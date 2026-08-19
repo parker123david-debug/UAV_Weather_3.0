@@ -116,7 +116,6 @@
 
   .np-header { display: flex; flex-direction: column; gap: 6px; }
 
-  /* Порядок: 1 - пошук, 2 - назва, 3 - область/координати/MGRS */
   .search-row { display: flex; gap: 6px; }
   .search-row input {
     flex: 1;
@@ -142,7 +141,6 @@
   }
   .np-coords { font-family: var(--mono); color: var(--ink-soft); }
   
-  /* MGRS Стиль */
   .mgrs-tag {
     font-family: var(--mono);
     font-weight: 700;
@@ -349,7 +347,6 @@
 </div>
 
 <script>
-// Встановлено точні початкові координати для трьох населених пунктів
 const locations = [
   { name: "Веселянка", lat: 47.683637776894514, lon: 35.37350647234079 },
   { name: "Степногірськ", lat: 47.58869248224713, lon: 35.36095708780877 },
@@ -613,8 +610,9 @@ function getWeatherIcon(type) {
   }
 }
 
+// Додано visibility до годинного запиту Open-Meteo
 async function fetchWeather(lat, lon) {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&timezone=Europe%2FKyiv&forecast_days=5&windspeed_unit=ms&hourly=temperature_2m,dew_point_2m,cloud_cover,wind_speed_10m,wind_gusts_10m,precipitation,weather_code&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,wind_direction_10m_dominant,weather_code`;
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&timezone=Europe%2FKyiv&forecast_days=5&windspeed_unit=ms&hourly=temperature_2m,dew_point_2m,cloud_cover,wind_speed_10m,wind_gusts_10m,precipitation,weather_code,visibility&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,wind_direction_10m_dominant,weather_code`;
   const res = await fetch(url);
   if (!res.ok) throw new Error("API error");
   return await res.json();
@@ -631,6 +629,33 @@ function renderCards(data) {
     const winds = idxs.map(k => data.hourly.wind_speed_10m[k]);
     const gusts = idxs.map(k => data.hourly.wind_gusts_10m[k]);
     const precips = idxs.map(k => data.hourly.precipitation[k]);
+
+    // Аналіз туману (коди погоди 45/48 або видимість < 1000 м)
+    const fogHours = [];
+    let minVisibility = 10000;
+
+    idxs.forEach(k => {
+      const vis = data.hourly.visibility ? data.hourly.visibility[k] : 10000;
+      const code = data.hourly.weather_code[k];
+      if (vis < minVisibility) minVisibility = vis;
+
+      const isFog = (code === 45 || code === 48 || vis < 1000);
+      if (isFog) {
+        const timeStr = data.hourly.time[k].split('T')[1].substring(0, 5);
+        fogHours.push(timeStr);
+      }
+    });
+
+    let fogText = "Не очікується";
+    let hasFog = fogHours.length > 0;
+
+    if (hasFog) {
+      const startH = fogHours[0];
+      const endH = fogHours[fogHours.length - 1];
+      const timeRange = (fogHours.length === 1) ? startH : `${startH}–${endH}`;
+      const visStr = minVisibility < 1000 ? `${Math.round(minVisibility)} м` : `${(minVisibility / 1000).toFixed(1)} км`;
+      fogText = `Є (${timeRange}, до ${visStr})`;
+    }
 
     const maxT = temps.length ? Math.round(Math.max(...temps)) : 0;
     const minT = temps.length ? Math.round(Math.min(...temps)) : 0;
@@ -673,16 +698,32 @@ function renderCards(data) {
     }
 
     let uavTag = 'СПРИЯТЛИВІ', tagClass = 'status-ok';
-    let uavNote = 'Нормальні умови для розвідувальних БпЛА.';
+    let uavNotes = [];
 
+    // Базові обмеження
     if (maxGust >= 14 || totalPrecip > 5 || cloudBase < 200 || weatherType === 'thunder') {
       uavTag = 'НЕСПРИЯТЛИВІ';
       tagClass = 'status-danger';
-      uavNote = `Критичний вітер (до ${maxGust} м/с) або злива/гроза.`;
+      uavNotes.push(`Критичний вітер (до ${maxGust} м/с) або злива/гроза.`);
     } else if (maxGust >= 9 || totalPrecip > 0.8 || cloudBase < 500) {
       uavTag = 'ОБМЕЖЕНІ';
       tagClass = 'status-warn';
-      uavNote = `Пориви до ${maxGust} м/с — знесення борту.`; // Виправлено формулювання
+      uavNotes.push(`Пориви до ${maxGust} м/с — знесення борту.`);
+    } else {
+      uavNotes.push('Нормальні умови для розвідувальних БпЛА.');
+    }
+
+    // Враховуємо вплив туману на БпЛА
+    if (hasFog) {
+      if (uavTag === 'СПРИЯТЛИВІ') {
+        uavTag = 'ОБМЕЖЕНІ';
+        tagClass = 'status-warn';
+      }
+      if (minVisibility < 300 && uavTag !== 'НЕСПРИЯТЛИВІ') {
+        uavTag = 'НЕСПРИЯТЛИВІ';
+        tagClass = 'status-danger';
+      }
+      uavNotes.push(`Обмежена видимість (туман ${fogHours[0]}–${fogHours[fogHours.length - 1]}).`);
     }
 
     return `
@@ -709,6 +750,11 @@ function renderCards(data) {
               <span class="lbl">Вітер (пориви)</span>
               <span class="val">${degToArrow(data.daily.wind_direction_10m_dominant[i])} ${minWind}-${maxWind} м/с (${maxGust})</span>
             </div>
+            <!-- Додано рядок про туман -->
+            <div class="m-row">
+              <span class="lbl">Туман</span>
+              <span class="val" style="${hasFog ? 'color:var(--warn); font-weight:700;' : ''}">${fogText}</span>
+            </div>
             <div class="m-row">
               <span class="lbl">Схід / Захід</span>
               <span class="val">${data.daily.sunrise[i].split('T')[1]} / ${data.daily.sunset[i].split('T')[1]}</span>
@@ -727,7 +773,7 @@ function renderCards(data) {
               <span class="status-badge ${tagClass}">${uavTag}</span>
             </div>
             <ul class="tac-list">
-              <li>${uavNote}</li>
+              ${uavNotes.map(n => `<li>${n}</li>`).join('')}
             </ul>
           </div>
 
@@ -757,7 +803,6 @@ async function loadNP(idx) {
   
   updateHeaderInfo(idx);
   
-  // Автоматичне уточнення назви та району за географічними координатами
   reverseGeocode(loc.lat, loc.lon).then(geo => {
     if (geo && geo.name) {
       document.getElementById(`title-${idx}`).textContent = `${idx + 1}. ${geo.name}`;
@@ -777,7 +822,6 @@ async function updateNP(idx) {
   const val = document.getElementById(`input-${idx}`).value.trim();
   if (!val) return;
 
-  // 1. Спроба розпізнати MGRS
   const mgrsLoc = mgrsToLatLon(val);
   if (mgrsLoc) {
     locations[idx].lat = mgrsLoc.lat;
@@ -793,7 +837,6 @@ async function updateNP(idx) {
     return;
   }
 
-  // 2. Спроба розпізнати десяткові координати (Lat, Lon)
   const parts = val.split(/[\s,]+/);
   if (parts.length >= 2) {
     const lat = parseFloat(parts[0]);
@@ -813,7 +856,6 @@ async function updateNP(idx) {
     }
   }
 
-  // 3. Пошук за назвою НП
   const geo = await forwardGeocode(val);
   if (geo) {
     locations[idx].lat = geo.lat;
