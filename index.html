@@ -250,7 +250,11 @@
   .status-warn { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn); }
   .status-danger { background: var(--danger-bg); color: var(--danger); border: 1px solid var(--danger); }
 
-  .tac-list { margin: 0; padding-left: 14px; font-size: 11.5px; line-height: 1.3; color: var(--ink); }
+  .tac-list { margin: 0; padding-left: 14px; font-size: 11.5px; line-height: 1.35; color: var(--ink); }
+  .tac-list li { margin-bottom: 2px; }
+
+  .time-tag-good { color: var(--ok); font-weight: 700; font-family: var(--mono); }
+  .time-tag-bad { color: var(--danger); font-weight: 700; font-family: var(--mono); }
 
   .weather-icon { width: 32px; height: 32px; display: inline-block; }
   
@@ -273,7 +277,7 @@
 <div class="app-container">
 
   <header class="top-bar">
-    <p class="top-title">Тактичний Метео-Монітор · 1 | 2 | 3 (MGRS)</p>
+    <p class="top-title">Тактичний Метео-Монітор · Часові Вікна БпЛА</p>
     <div style="display:flex; gap:8px;">
       <button class="btn" onclick="loadAllNP()">🔄 Оновити всі 3 НП</button>
       <button class="btn" onclick="toggleTheme()">🌓 Тема</button>
@@ -367,7 +371,35 @@ function degToArrow(deg) {
   return dirs[Math.round(((deg + 180) % 360) / 45) % 8];
 }
 
-/* ==================== MGRS (NATO COORD) CONVERTER ==================== */
+/* ==================== ДОПОМІЖНА ФУНКЦІЯ ГРУПУВАННЯ ГОДИН ==================== */
+function groupContinuousHours(hourIndices, hourlyTimeList) {
+  if (!hourIndices || hourIndices.length === 0) return "—";
+  
+  const hours = hourIndices.map(k => parseInt(hourlyTimeList[k].split('T')[1].split(':')[0], 10));
+  let ranges = [];
+  let start = hours[0];
+  let prev = hours[0];
+
+  for (let i = 1; i < hours.length; i++) {
+    if (hours[i] === prev + 1) {
+      prev = hours[i];
+    } else {
+      ranges.push(formatHourRange(start, prev + 1));
+      start = hours[i];
+      prev = hours[i];
+    }
+  }
+  ranges.push(formatHourRange(start, prev + 1));
+  return ranges.join(', ');
+}
+
+function formatHourRange(startH, endH) {
+  const s = String(startH).padStart(2, '0') + ':00';
+  const e = String(endH === 24 ? 24 : endH).padStart(2, '0') + ':00';
+  return `${s}–${e}`;
+}
+
+/* ==================== MGRS CONVERTER ==================== */
 function latLonToMGRS(lat, lon, digits = 4) {
   if (isNaN(lat) || isNaN(lon)) return "";
 
@@ -610,7 +642,6 @@ function getWeatherIcon(type) {
   }
 }
 
-// Додано visibility до годинного запиту Open-Meteo
 async function fetchWeather(lat, lon) {
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&timezone=Europe%2FKyiv&forecast_days=5&windspeed_unit=ms&hourly=temperature_2m,dew_point_2m,cloud_cover,wind_speed_10m,wind_gusts_10m,precipitation,weather_code,visibility&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,wind_direction_10m_dominant,weather_code`;
   const res = await fetch(url);
@@ -630,25 +661,47 @@ function renderCards(data) {
     const gusts = idxs.map(k => data.hourly.wind_gusts_10m[k]);
     const precips = idxs.map(k => data.hourly.precipitation[k]);
 
-    // Аналіз туману (коди погоди 45/48 або видимість < 1000 м)
+    // ПОГОДИННИЙ АНАЛІЗ УМОВ ДЛЯ БПЛА
+    const goodHours = [];
+    const badHours = [];
+    const badReasons = new Set();
     const fogHours = [];
     let minVisibility = 10000;
 
     idxs.forEach(k => {
+      const gust = data.hourly.wind_gusts_10m[k] || 0;
+      const precip = data.hourly.precipitation[k] || 0;
       const vis = data.hourly.visibility ? data.hourly.visibility[k] : 10000;
       const code = data.hourly.weather_code[k];
+
       if (vis < minVisibility) minVisibility = vis;
 
       const isFog = (code === 45 || code === 48 || vis < 1000);
+      const isThunder = (code >= 95);
+      const isHeavyPrecip = (precip > 0.8);
+      const isHighWind = (gust >= 11);
+
       if (isFog) {
         const timeStr = data.hourly.time[k].split('T')[1].substring(0, 5);
         fogHours.push(timeStr);
+      }
+
+      // Визначення критичних умов
+      if (isHighWind || isHeavyPrecip || isThunder || (isFog && vis < 500)) {
+        badHours.push(k);
+        if (isHighWind) badReasons.add("пориви вітру");
+        if (isHeavyPrecip) badReasons.add("дощ");
+        if (isThunder) badReasons.add("гроза");
+        if (isFog) badReasons.add("туман");
+      } 
+      // Визначення сприятливих умов (вітер <= 8 м/с, без опадів, без туману)
+      else if (gust <= 8 && precip <= 0.1 && vis >= 2000) {
+        goodHours.push(k);
       }
     });
 
     let fogText = "Не очікується";
     let hasFog = fogHours.length > 0;
-
     if (hasFog) {
       const startH = fogHours[0];
       const endH = fogHours[fogHours.length - 1];
@@ -656,6 +709,9 @@ function renderCards(data) {
       const visStr = minVisibility < 1000 ? `${Math.round(minVisibility)} м` : `${(minVisibility / 1000).toFixed(1)} км`;
       fogText = `Є (${timeRange}, до ${visStr})`;
     }
+
+    const goodTimeRanges = groupContinuousHours(goodHours, data.hourly.time);
+    const badTimeRanges = groupContinuousHours(badHours, data.hourly.time);
 
     const maxT = temps.length ? Math.round(Math.max(...temps)) : 0;
     const minT = temps.length ? Math.round(Math.min(...temps)) : 0;
@@ -698,32 +754,12 @@ function renderCards(data) {
     }
 
     let uavTag = 'СПРИЯТЛИВІ', tagClass = 'status-ok';
-    let uavNotes = [];
-
-    // Базові обмеження
-    if (maxGust >= 14 || totalPrecip > 5 || cloudBase < 200 || weatherType === 'thunder') {
+    if (badHours.length > 12 || maxGust >= 14 || totalPrecip > 5 || weatherType === 'thunder') {
       uavTag = 'НЕСПРИЯТЛИВІ';
       tagClass = 'status-danger';
-      uavNotes.push(`Критичний вітер (до ${maxGust} м/с) або злива/гроза.`);
-    } else if (maxGust >= 9 || totalPrecip > 0.8 || cloudBase < 500) {
+    } else if (badHours.length > 0 || maxGust >= 9 || totalPrecip > 0.8 || hasFog) {
       uavTag = 'ОБМЕЖЕНІ';
       tagClass = 'status-warn';
-      uavNotes.push(`Пориви до ${maxGust} м/с — знесення борту.`);
-    } else {
-      uavNotes.push('Нормальні умови для розвідувальних БпЛА.');
-    }
-
-    // Враховуємо вплив туману на БпЛА
-    if (hasFog) {
-      if (uavTag === 'СПРИЯТЛИВІ') {
-        uavTag = 'ОБМЕЖЕНІ';
-        tagClass = 'status-warn';
-      }
-      if (minVisibility < 300 && uavTag !== 'НЕСПРИЯТЛИВІ') {
-        uavTag = 'НЕСПРИЯТЛИВІ';
-        tagClass = 'status-danger';
-      }
-      uavNotes.push(`Обмежена видимість (туман ${fogHours[0]}–${fogHours[fogHours.length - 1]}).`);
     }
 
     return `
@@ -750,7 +786,6 @@ function renderCards(data) {
               <span class="lbl">Вітер (пориви)</span>
               <span class="val">${degToArrow(data.daily.wind_direction_10m_dominant[i])} ${minWind}-${maxWind} м/с (${maxGust})</span>
             </div>
-            <!-- Додано рядок про туман -->
             <div class="m-row">
               <span class="lbl">Туман</span>
               <span class="val" style="${hasFog ? 'color:var(--warn); font-weight:700;' : ''}">${fogText}</span>
@@ -773,7 +808,9 @@ function renderCards(data) {
               <span class="status-badge ${tagClass}">${uavTag}</span>
             </div>
             <ul class="tac-list">
-              ${uavNotes.map(n => `<li>${n}</li>`).join('')}
+              <li><b>Сприятливі вікна:</b> <span class="time-tag-good">${goodTimeRanges}</span></li>
+              ${badHours.length > 0 ? `<li><b>Критичні години:</b> <span class="time-tag-bad">${badTimeRanges}</span> (${Array.from(badReasons).join(', ')})</li>` : ''}
+              <li>Пориви вітру до <b>${maxGust} м/с</b>.</li>
             </ul>
           </div>
 
